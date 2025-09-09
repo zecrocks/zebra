@@ -1,0 +1,150 @@
+# Multi-architecture Docker build workflow for Zebra
+# Builds x86_64 and ARM64 Docker images and pushes them to Docker Hub
+name: Build Multi-Architecture Docker Images
+
+on:
+  # Trigger on pushes to main branch
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "docker/**"
+      - ".dockerignore"
+      - ".github/workflows/build-multiarch-docker.yml"
+  
+  # Trigger on releases
+  release:
+    types:
+      - released
+  
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      push_to_registry:
+        description: 'Push images to Docker Hub'
+        required: false
+        type: boolean
+        default: true
+      tag_latest:
+        description: 'Tag as latest'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: zebra
+  RUST_LOG: ${{ vars.RUST_LOG || 'info' }}
+  FEATURES: ${{ vars.RUST_PROD_FEATURES || 'default-release-binaries' }}
+
+jobs:
+  build-multiarch:
+    name: Build Multi-Architecture Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      
+      - name: Inject slug/short variables
+        uses: rlespinasse/github-slug-action@v5
+        with:
+          short-length: 7
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.2.0
+        with:
+          platforms: linux/amd64,linux/arm64
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.7.1
+        with:
+          platforms: linux/amd64,linux/arm64
+      
+      - name: Log in to Docker Hub
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5.6.1
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # For releases, create version tags
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # For main branch pushes, create edge tag
+            type=edge,branch=main
+            # For manual triggers or releases, optionally tag as latest
+            type=raw,value=latest,enable=${{ inputs.tag_latest == true || (github.event_name == 'release' && !github.event.release.prerelease) }}
+            # Always include SHA for traceability
+            type=sha,prefix={{branch}}-
+          flavor: |
+            latest=false
+      
+      - name: Build and push multi-architecture image
+        uses: docker/build-push-action@v6.10.0
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' && (inputs.push_to_registry != false) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SHORT_SHA=${{ env.GITHUB_SHA_SHORT }}
+            RUST_LOG=${{ env.RUST_LOG }}
+            FEATURES=${{ env.FEATURES }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Enable provenance attestations for security
+          provenance: mode=max
+          sbom: true
+      
+      - name: Build and push experimental image (releases only)
+        if: github.event_name == 'release'
+        uses: docker/build-push-action@v6.10.0
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-experimental
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-experimental
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SHORT_SHA=${{ env.GITHUB_SHA_SHORT }}
+            RUST_LOG=${{ env.RUST_LOG }}
+            FEATURES=${{ env.FEATURES }} ${{ vars.RUST_EXPERIMENTAL_FEATURES }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+      
+      - name: Generate build summary
+        run: |
+          echo "## Multi-Architecture Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Architectures:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** runtime" >> $GITHUB_STEP_SUMMARY
+          echo "**Features:** ${{ env.FEATURES }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.meta.outputs.tags }}' | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY

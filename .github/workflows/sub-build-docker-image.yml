@@ -40,6 +40,11 @@ on:
         required: false
         type: boolean
         default: false
+      multiarch:
+        description: 'Build for multiple architectures (linux/amd64,linux/arm64)'
+        required: false
+        type: boolean
+        default: false
 
     outputs:
       image_digest:
@@ -135,14 +140,22 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Setup Docker Buildx to use Docker Build Cloud
+      # Set up QEMU for multi-architecture builds
+      - name: Set up QEMU
+        if: ${{ inputs.multiarch }}
+        uses: docker/setup-qemu-action@v3.2.0
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      # Setup Docker Buildx to use Docker Build Cloud or local driver for multi-arch
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@v3.10.0
         with:
           version: "lab:latest"
-          driver: cloud
-          endpoint: "zfnd/zebra"
+          driver: ${{ inputs.multiarch && 'docker-container' || 'cloud' }}
+          endpoint: ${{ !inputs.multiarch && 'zfnd/zebra' || '' }}
+          platforms: ${{ inputs.multiarch && 'linux/amd64,linux/arm64' || '' }}
 
       # Build and push image to Google Artifact Registry, and possibly DockerHub
       - name: Build & push
@@ -152,6 +165,7 @@ jobs:
           target: ${{ inputs.dockerfile_target }}
           context: .
           file: ${{ inputs.dockerfile_path }}
+          platforms: ${{ inputs.multiarch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
