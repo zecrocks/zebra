@@ -1625,6 +1625,19 @@ impl Service<ReadRequest> for ReadStateService {
             )
             .map(ReadResponse::AddressUtxos),
 
+            // For the get_address_utxos_by_height RPC.
+            ReadRequest::UtxosByAddressesInHeightRange {
+                addresses,
+                height_range,
+            } => read::address_utxos_in_height_range(
+                &state.network,
+                state.latest_best_chain(),
+                &state.db,
+                addresses,
+                height_range,
+            )
+            .map(ReadResponse::AddressUtxos),
+
             ReadRequest::CheckBestChainTipNullifiersAndAnchors(unmined_tx) => {
                 let latest_non_finalized_best_chain = state.latest_best_chain();
 

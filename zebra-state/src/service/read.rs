@@ -26,7 +26,7 @@ mod tests;
 pub use address::{
     balance::transparent_balance,
     tx_id::transparent_tx_ids,
-    utxo::{address_utxos, AddressUtxos},
+    utxo::{address_utxos, address_utxos_in_height_range, AddressUtxos},
 };
 pub use block::{
     any_block, any_transaction, any_utxo, block, block_and_size, block_header, block_info,

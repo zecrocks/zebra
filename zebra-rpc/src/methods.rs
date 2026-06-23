@@ -461,6 +461,28 @@ pub trait Rpc {
         request: GetAddressUtxosRequest,
     ) -> Result<GetAddressUtxosResponse>;
 
+    /// Returns unspent outputs created within a height range for a list of addresses.
+    ///
+    /// This is a Zebra extension; it has no `zcashd` equivalent. Unlike
+    /// `getaddressutxos`, the cost of this query is proportional to the number of
+    /// outputs created in the height range rather than the number of addresses,
+    /// which makes it suitable for incremental polling and large-scale initial
+    /// import.
+    ///
+    /// Note: it returns outputs created at or after the start height that are
+    /// still unspent. It does not report outputs created before the start height
+    /// that were spent within the range.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: a list of `addresses`, plus optional inclusive `start_height`
+    ///   and `end_height`. Omitted bounds default to the full chain range.
+    #[method(name = "getaddressutxosbyheight")]
+    async fn get_address_utxos_by_height(
+        &self,
+        request: GetAddressUtxosByHeightRequest,
+    ) -> Result<GetAddressUtxosResponse>;
+
     /// Stop the running zebrad process.
     ///
     /// # Notes
@@ -2161,6 +2183,76 @@ where
         }
     }
 
+    async fn get_address_utxos_by_height(
+        &self,
+        request: GetAddressUtxosByHeightRequest,
+    ) -> Result<GetAddressUtxosResponse> {
+        let mut read_state = self.read_state.clone();
+        let mut response_utxos = vec![];
+
+        let valid_addresses = request.valid_addresses()?;
+
+        // Omitted bounds default to the full chain range. `Height::as_bytes`
+        // saturates above the on-disk maximum, so `Height::MAX` is a safe end.
+        let start_height = Height(request.start_height.unwrap_or(0));
+        let end_height = request.end_height.map_or(Height::MAX, Height);
+
+        if start_height > end_height {
+            return Err(ErrorObject::owned(
+                ErrorCode::InvalidParams.code(),
+                "start_height must not be greater than end_height",
+                None::<()>,
+            ));
+        }
+
+        let read_request = zebra_state::ReadRequest::UtxosByAddressesInHeightRange {
+            addresses: valid_addresses,
+            height_range: start_height..=end_height,
+        };
+        let response = read_state
+            .ready()
+            .and_then(|service| service.call(read_request))
+            .await
+            .map_misc_error()?;
+        let utxos = match response {
+            zebra_state::ReadResponse::AddressUtxos(utxos) => utxos,
+            _ => unreachable!("unmatched response to a UtxosByAddressesInHeightRange request"),
+        };
+
+        let mut last_output_location = OutputLocation::from_usize(Height(0), 0, 0);
+
+        for utxo_data in utxos.utxos() {
+            let address = utxo_data.0;
+            let txid = *utxo_data.1;
+            let height = utxo_data.2.height();
+            let output_index = utxo_data.2.output_index();
+            let script = utxo_data.3.lock_script.clone();
+            let satoshis = u64::from(utxo_data.3.value);
+
+            let output_location = *utxo_data.2;
+            // Check that the returned UTXOs are in chain order.
+            assert!(
+                output_location > last_output_location,
+                "UTXOs were not in chain order:\n\
+                     {output_location:?} {address:?} {txid:?} was after:\n\
+                     {last_output_location:?}",
+            );
+
+            response_utxos.push(Utxo {
+                address,
+                txid,
+                output_index,
+                script,
+                satoshis,
+                height,
+            });
+
+            last_output_location = output_location;
+        }
+
+        Ok(GetAddressUtxosResponse::Utxos(response_utxos))
+    }
+
     fn stop(&self) -> Result<String> {
         #[cfg(not(target_os = "windows"))]
         if self.network.is_regtest() {
@@ -3645,6 +3737,27 @@ enum DGetAddressUtxosRequest {
 }
 
 impl ValidateAddresses for GetAddressUtxosRequest {
+    fn addresses(&self) -> &[String] {
+        &self.addresses
+    }
+}
+
+/// Parameters of the `getaddressutxosbyheight` RPC method (a Zebra extension).
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, JsonSchema)]
+pub struct GetAddressUtxosByHeightRequest {
+    /// A list of addresses to get unspent outputs from.
+    addresses: Vec<String>,
+
+    /// The inclusive start height of the range. Defaults to the start of the chain.
+    #[serde(default)]
+    start_height: Option<u32>,
+
+    /// The inclusive end height of the range. Defaults to the chain tip.
+    #[serde(default)]
+    end_height: Option<u32>,
+}
+
+impl ValidateAddresses for GetAddressUtxosByHeightRequest {
     fn addresses(&self) -> &[String] {
         &self.addresses
     }

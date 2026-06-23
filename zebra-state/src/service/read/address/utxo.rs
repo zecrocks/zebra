@@ -198,6 +198,104 @@ where
     utxo_error.expect("unexpected missing error: attempts should set error or return")
 }
 
+/// Like [`address_utxos`], but only returns UTXOs created within `height_range`.
+///
+/// The cost of this query is proportional to the number of outputs created in
+/// `height_range`, not the number of `addresses`, because the finalized query
+/// scans the height-ordered output index instead of each address's UTXO set.
+///
+/// This returns outputs created at or after the start height that are still
+/// unspent at the queried tip. It does **not** report outputs created before the
+/// start height that were spent within the range — tracking those requires a
+/// separate spend-by-height index (see the design notes for this query).
+pub fn address_utxos_in_height_range<C>(
+    network: &Network,
+    chain: Option<C>,
+    db: &ZebraDb,
+    addresses: HashSet<transparent::Address>,
+    height_range: RangeInclusive<Height>,
+) -> Result<AddressUtxos, BoxError>
+where
+    C: AsRef<Chain>,
+{
+    let mut utxo_error = None;
+    let address_count = addresses.len();
+
+    // Retry the finalized UTXO query if it was interrupted by a finalizing block,
+    // and the non-finalized chain doesn't overlap the changed heights.
+    // This mirrors the retry/consistency logic in `address_utxos`.
+    for attempt in 0..=FINALIZED_STATE_QUERY_RETRIES {
+        debug!(
+            ?attempt,
+            ?address_count,
+            ?height_range,
+            "starting height-scoped address UTXO query"
+        );
+
+        // Check if the finalized state changed while we were querying it.
+        let start_finalized_tip = db.finalized_tip_height();
+        let finalized_utxos =
+            db.finalized_address_utxos_in_height_range(network, &addresses, height_range.clone());
+        let end_finalized_tip = db.finalized_tip_height();
+
+        let finalized_tip_range = match (start_finalized_tip, end_finalized_tip) {
+            (Some(start), Some(end)) => Some(start..=end),
+            // State is empty
+            _ => None,
+        };
+
+        // Apply the non-finalized UTXO changes, reusing the same consistency
+        // checks as `address_utxos`.
+        let chain_utxo_changes =
+            chain_transparent_utxo_changes(chain.as_ref(), &addresses, finalized_tip_range);
+
+        match chain_utxo_changes {
+            Ok((created_chain_utxos, spent_chain_utxos, last_height)) => {
+                // Only keep non-finalized creations within the queried height range.
+                let created_chain_utxos: BTreeMap<OutputLocation, transparent::Output> =
+                    created_chain_utxos
+                        .into_iter()
+                        .filter(|(out_loc, _output)| height_range.contains(&out_loc.height()))
+                        .collect();
+
+                let utxos =
+                    apply_utxo_changes(finalized_utxos, created_chain_utxos, spent_chain_utxos);
+                let tx_ids = lookup_tx_ids_for_utxos(chain.as_ref(), db, &addresses, &utxos);
+
+                // Get the matching hash for the given height, if any.
+                let last_height_and_hash = last_height.and_then(|height| {
+                    Some(height).zip(
+                        chain
+                            .as_ref()
+                            .and_then(|c| c.as_ref().hash_by_height(height))
+                            .or_else(|| db.hash(height)),
+                    )
+                });
+
+                return Ok(AddressUtxos::new(
+                    network,
+                    utxos,
+                    tx_ids,
+                    last_height_and_hash,
+                ));
+            }
+
+            Err(chain_utxo_error) => {
+                debug!(
+                    ?chain_utxo_error,
+                    ?address_count,
+                    ?attempt,
+                    "height-scoped chain address UTXO response",
+                );
+
+                utxo_error = Some(Err(chain_utxo_error))
+            }
+        }
+    }
+
+    utxo_error.expect("unexpected missing error: attempts should set error or return")
+}
+
 /// Returns the unspent transparent outputs (UTXOs) for `addresses` in the finalized chain,
 /// and the finalized tip heights the UTXOs were queried at.
 ///

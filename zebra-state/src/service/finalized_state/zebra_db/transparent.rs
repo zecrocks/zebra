@@ -377,6 +377,59 @@ impl ZebraDb {
             .collect()
     }
 
+    /// Returns the unspent transparent outputs created in the finalized chain
+    /// within `height_range`, filtered to `addresses`, in chain order.
+    ///
+    /// An empty `addresses` set matches nothing (like `getaddressutxos`).
+    ///
+    /// Unlike [`Self::partial_finalized_address_utxos`], the cost of this query
+    /// is proportional to the number of outputs created in `height_range`, not
+    /// the number of `addresses`. It scans the height-ordered `utxo_by_out_loc`
+    /// column family directly, so it returns the outputs created at or after the
+    /// start height that are still unspent in the finalized state. (Outputs
+    /// created before the start height and spent within the range are not
+    /// reported, because they are no longer in the unspent index.)
+    ///
+    /// # Correctness
+    ///
+    /// Callers should apply the non-finalized UTXO changes for `addresses` to
+    /// the returned UTXOs, the same way [`Self::partial_finalized_address_utxos`]
+    /// callers do.
+    pub fn finalized_address_utxos_in_height_range(
+        &self,
+        network: &Network,
+        addresses: &HashSet<transparent::Address>,
+        height_range: RangeInclusive<Height>,
+    ) -> BTreeMap<OutputLocation, transparent::Output> {
+        let utxo_by_out_loc = self.db.cf_handle("utxo_by_out_loc").unwrap();
+
+        // Build a half-open output-location range covering every output in
+        // `height_range`. Output locations sort by height first (big-endian),
+        // so this is a single ordered scan bounded by the height window,
+        // independent of the number of addresses.
+        let start =
+            std::ops::Bound::Included(OutputLocation::from_usize(*height_range.start(), 0, 0));
+        // Exclusive upper bound: the first output of the block after the end
+        // height. `Height::as_bytes` saturates above the on-disk maximum, so
+        // passing `Height::MAX` as the full-range end is handled safely here.
+        let end = std::ops::Bound::Excluded(OutputLocation::from_usize(
+            Height(height_range.end().0.saturating_add(1)),
+            0,
+            0,
+        ));
+
+        self.db
+            .zs_forward_range_iter(&utxo_by_out_loc, (start, end))
+            .filter(
+                |(_out_loc, output): &(OutputLocation, transparent::Output)| {
+                    output
+                        .address(network)
+                        .is_some_and(|address| addresses.contains(&address))
+                },
+            )
+            .collect()
+    }
+
     /// Returns the transaction IDs that sent or received funds to `addresses`,
     /// in the finalized chain `query_height_range`.
     ///

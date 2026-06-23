@@ -1352,6 +1352,23 @@ pub enum ReadRequest {
     /// Returns a type with found utxos and transaction information.
     UtxosByAddresses(HashSet<transparent::Address>),
 
+    /// Looks up utxos created within `height_range` for the provided addresses.
+    ///
+    /// Unlike [`ReadRequest::UtxosByAddresses`], the cost of this query is
+    /// proportional to the number of outputs created in `height_range`, not the
+    /// number of addresses, because it scans the height-ordered output index.
+    /// This makes it suitable for incremental polling and large-scale import.
+    ///
+    /// Returns [`ReadResponse::AddressUtxos`] with the utxos created in the
+    /// range that are still unspent, and their transaction information.
+    UtxosByAddressesInHeightRange {
+        /// The requested addresses.
+        addresses: HashSet<transparent::Address>,
+
+        /// The inclusive range of block heights to return created utxos for.
+        height_range: RangeInclusive<block::Height>,
+    },
+
     /// Contextually validates anchors and nullifiers of a transaction on the best chain
     ///
     /// Returns [`ReadResponse::ValidBestChainTipNullifiersAndAnchors`].
@@ -1439,6 +1456,9 @@ impl ReadRequest {
             ReadRequest::AddressBalance { .. } => "address_balance",
             ReadRequest::TransactionIdsByAddresses { .. } => "transaction_ids_by_addresses",
             ReadRequest::UtxosByAddresses(_) => "utxos_by_addresses",
+            ReadRequest::UtxosByAddressesInHeightRange { .. } => {
+                "utxos_by_addresses_in_height_range"
+            }
             ReadRequest::CheckBestChainTipNullifiersAndAnchors(_) => {
                 "best_chain_tip_nullifiers_anchors"
             }
