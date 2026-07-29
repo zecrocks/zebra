@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.1.0] - 2026-07-29
+
 ### Added
 
 - Connection-attempt, terminal-outcome, and remote-version metrics with bounded network,
